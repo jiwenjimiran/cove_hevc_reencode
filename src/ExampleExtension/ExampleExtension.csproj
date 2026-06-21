@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="extension.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Always" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseLocalCovePlugins)' == 'false'">
+    <PackageReference Include="Cove.Plugins" Version="$(CovePluginsVersion)" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(UseLocalCovePlugins)' == 'true'">
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\..\..\cove\src\Cove.Plugins\Cove.Plugins.csproj" Condition="Exists('$(MSBuildThisFileDirectory)..\..\..\cove\src\Cove.Plugins\Cove.Plugins.csproj')">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+    <ProjectReference Include="$(MSBuildThisFileDirectory)..\..\..\..\src\Cove.Plugins\Cove.Plugins.csproj" Condition="Exists('$(MSBuildThisFileDirectory)..\..\..\..\src\Cove.Plugins\Cove.Plugins.csproj')">
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </ProjectReference>
+  </ItemGroup>
+</Project>
