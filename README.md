@@ -1,11 +1,15 @@
-# Cove Single Extension Template
+# HEVC Reencode Cove Extension
 
-Use this template when one repository owns one Cove extension. On GitHub, 
-create new extensions with the **Use this template** button.
+HEVC Reencode is a Cove extension that ports the jiwenji Stash reencode plugin to Cove. It adds a **HEVC Reencode** panel under installed extension settings and queues Cove background jobs that run local GPU HEVC reencoding through Cove-managed FFmpeg.
 
-After creating a repository from the template, replace the example extension ID,
-namespaces, manifest fields, and release workflow `EXTENSION_ID` with your real
-extension values.
+## Features
+
+- Settings panel under `Settings -> Extensions -> Installed`
+- All Stash reencode options with matching defaults
+- Local encoder health check
+- Video detail and bulk actions for queueing HEVC reencode jobs
+- Background job progress bridged into Cove's job system
+- Native Cove/.NET orchestration with no Python worker or Docker sidecar
 
 ## Build
 
@@ -13,22 +17,25 @@ extension values.
 dotnet build .\SingleExtensionTemplate.slnx -c Release
 ```
 
-## Package
-
-The CI workflow publishes the project, copies `extension.json` to the package
-root, creates `<extension-id>-<version>.zip`, and attaches it to tags named
-`v<version>`.
-
-## Local Cove contract development
-
-If this repo is checked out beside `cove`, the project automatically uses the
-local `src/Cove.Plugins` project. Force package mode with:
+To force package-mode contracts, matching CI:
 
 ```powershell
-dotnet build -p:UseLocalCovePlugins=false
+dotnet build .\SingleExtensionTemplate.slnx -c Release -p:UseLocalCovePlugins=false
 ```
 
-## Scraper examples
+## Package
 
-The `scraper-examples` folder includes a pure YAML scraper example for extensions
-that do not need compiled C# logic.
+The CI workflow publishes `src/HevcReencode/HevcReencode.csproj`, copies `extension.json` to the package root, creates `cove.community.ai.hevc-reencode-<version>.zip`, and attaches it to tags named `v<version>`.
+
+## Encoder
+
+The extension uses `ffmpeg` and `ffprobe` from Cove's configured/managed FFmpeg installation or from PATH. It probes for GPU HEVC encoders and supports:
+
+- `hevc_nvenc`
+- `hevc_amf`
+
+CPU `libx265` fallback is intentionally disabled. If no GPU HEVC encoder works, jobs fail with a clear encoder health error.
+
+## Current Limitations
+
+This port replaces files in place so existing Cove metadata stays attached to the same video/file record. Suffix outputs and failure tag application are represented in settings for compatibility, but the full Cove integrations are still follow-up work.

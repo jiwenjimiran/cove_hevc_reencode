@@ -1,0 +1,167 @@
+.hevc-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.hevc-basic {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+  gap: 12px;
+}
+
+.hevc-check,
+.hevc-field {
+  border: 1px solid var(--color-border, #2f3338);
+  background: var(--color-card, rgba(255, 255, 255, 0.03));
+  border-radius: 8px;
+  color: var(--color-foreground, #e8e8e8);
+}
+
+.hevc-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  font-size: 13px;
+}
+
+.hevc-advanced {
+  border: 1px solid var(--color-border, #2f3338);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.hevc-advanced-toggle {
+  width: 100%;
+  padding: 11px 12px;
+  border: 0;
+  background: var(--color-card, rgba(255, 255, 255, 0.06));
+  color: var(--color-foreground, #e8e8e8);
+  text-align: left;
+  font-weight: 600;
+}
+
+.hevc-fields {
+  display: flex;
+  flex-direction: column;
+}
+
+.hevc-field {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 10px 12px;
+  border-width: 1px 0 0;
+  border-radius: 0;
+}
+
+.hevc-field.disabled {
+  opacity: 0.55;
+}
+
+.hevc-label {
+  font-size: 13px;
+}
+
+.hevc-hint,
+.hevc-muted,
+.hevc-note {
+  color: var(--color-muted, #9ca3af);
+  font-size: 12px;
+}
+
+.hevc-control {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hevc-input {
+  min-width: 220px;
+  max-width: 420px;
+  border: 1px solid var(--color-border, #2f3338);
+  border-radius: 6px;
+  background: var(--color-surface, #17191d);
+  color: var(--color-foreground, #e8e8e8);
+  padding: 7px 9px;
+  font-size: 13px;
+}
+
+.hevc-input.short {
+  min-width: 80px;
+  width: 96px;
+}
+
+.hevc-reset,
+.hevc-button {
+  border: 1px solid var(--color-border, #2f3338);
+  border-radius: 6px;
+  background: var(--color-card, rgba(255, 255, 255, 0.04));
+  color: var(--color-foreground, #e8e8e8);
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.hevc-reset:disabled,
+.hevc-button:disabled {
+  opacity: 0.45;
+}
+
+.hevc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.hevc-chips button {
+  border: 1px solid var(--color-border, #2f3338);
+  border-radius: 999px;
+  background: var(--color-card, rgba(255, 255, 255, 0.05));
+  color: var(--color-foreground, #e8e8e8);
+  padding: 6px 11px;
+}
+
+.hevc-chips button.selected {
+  border-color: #15803d;
+  background: #15803d;
+  color: white;
+}
+
+.hevc-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.hevc-health {
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--color-border, #2f3338);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 12px;
+}
+
+.hevc-health.ok {
+  border-color: #15803d;
+}
+
+.hevc-health.bad {
+  border-color: #b91c1c;
+}
+
+@media (max-width: 760px) {
+  .hevc-basic,
+  .hevc-field {
+    grid-template-columns: 1fr;
+  }
+
+  .hevc-input {
+    min-width: 0;
+    width: 100%;
+  }
+}

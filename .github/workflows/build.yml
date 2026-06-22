@@ -9,8 +9,8 @@ on:
 
 env:
   DOTNET_VERSION: '10.0.x'
-  EXTENSION_PROJECT: src/ExampleExtension/ExampleExtension.csproj
-  EXTENSION_ID: com.example.extension
+  EXTENSION_PROJECT: src/HevcReencode/HevcReencode.csproj
+  EXTENSION_ID: cove.community.ai.hevc-reencode
 
 permissions:
   contents: write
@@ -46,7 +46,7 @@ jobs:
         run: dotnet publish ${{ env.EXTENSION_PROJECT }} -c Release -o artifacts/extension --no-build -p:UseLocalCovePlugins=false
 
       - name: Copy manifest
-        run: cp src/ExampleExtension/extension.json artifacts/extension/
+        run: cp src/HevcReencode/extension.json artifacts/extension/
 
       - name: Package
         if: startsWith(github.ref, 'refs/tags/')

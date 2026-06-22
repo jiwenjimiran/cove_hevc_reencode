@@ -1,5 +1,5 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/ExampleExtension/ExampleExtension.csproj" />
+    <Project Path="src/HevcReencode/HevcReencode.csproj" />
   </Folder>
 </Solution>
