@@ -18,6 +18,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 {
     public const string ExtensionId = "cove.community.ai.hevc-reencode";
     private const string SettingsKey = "settings";
+    private const string PendingReplacementsKey = "pending-replacements";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -30,6 +31,9 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 
     private IExtensionStore? _store;
     private IServiceProvider? _services;
+    private CancellationTokenSource? _finalizerCts;
+    private Task? _finalizerTask;
+    private readonly SemaphoreSlim _pendingQueueLock = new(1, 1);
     public string Id => ExtensionId;
     public string Name => "HEVC Reencode";
     public string Version => "0.1.0";
@@ -51,7 +55,25 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
     public Task InitializeAsync(IServiceProvider services, CancellationToken ct = default)
     {
         _services = services;
+        _finalizerCts = new CancellationTokenSource();
+        _finalizerTask = Task.Run(() => RunPendingReplacementLoopAsync(_finalizerCts.Token), CancellationToken.None);
         return Task.CompletedTask;
+    }
+
+    public async Task ShutdownAsync(CancellationToken ct = default)
+    {
+        if (_finalizerCts is null)
+            return;
+
+        await _finalizerCts.CancelAsync();
+        if (_finalizerTask is not null)
+        {
+            try { await _finalizerTask.WaitAsync(TimeSpan.FromSeconds(5), ct); }
+            catch { }
+        }
+        _finalizerCts.Dispose();
+        _finalizerCts = null;
+        _finalizerTask = null;
     }
 
     public UIManifest GetUIManifest()
@@ -170,6 +192,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         var completed = 0;
         var succeeded = 0;
         var skipped = 0;
+        var pending = 0;
         var failed = 0;
         var errors = new List<string>();
         var rescanPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -209,6 +232,8 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 
                 if (result.Status == "skipped")
                     skipped++;
+                else if (result.Status == "pending")
+                    pending++;
                 else if (result.Success)
                 {
                     succeeded++;
@@ -245,7 +270,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
                 progress.Report(99, $"Queued Cove rescan for {rescanPaths.Count} path(s). Scan job: {scanJobId}");
         }
 
-        var summary = $"HEVC reencode complete. Success: {succeeded}, skipped: {skipped}, failed: {failed}.";
+        var summary = $"HEVC reencode complete. Success: {succeeded}, pending replacement: {pending}, skipped: {skipped}, failed: {failed}.";
         if (errors.Count > 0)
             summary += " Errors: " + string.Join(" | ", errors.Take(5)) + (errors.Count > 5 ? $" | and {errors.Count - 5} more" : "");
         progress.Report(100, summary);
@@ -328,10 +353,10 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             formatChanged = true;
         }
 
-        var tempPath = Path.Combine(Path.GetDirectoryName(target.Path)!, $"{Path.GetFileName(target.Path)}.hevc-{Guid.NewGuid():N}.tmp");
         var finalPath = formatChanged
             ? Path.Combine(Path.GetDirectoryName(target.Path)!, Path.GetFileNameWithoutExtension(target.Path) + outputExtension)
             : target.Path;
+        var tempPath = CreateTempOutputPath(target.Path, outputExtension);
 
         var methods = BuildEncodeMethods(encoder, LooksTooLowBitrate(info.Width, info.Height, info.Bitrate), settings);
         var lastError = "";
@@ -376,7 +401,30 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
                         break;
                     }
 
-                    FinalizeOutput(target, tempPath, finalPath);
+                    try
+                    {
+                        FinalizeOutput(target, tempPath, finalPath);
+                    }
+                    catch (IOException ex) when (IsSharingOrLockViolation(ex))
+                    {
+                        var pendingItem = new PendingReplacement(
+                            Id: Guid.NewGuid().ToString("N"),
+                            VideoId: target.VideoId,
+                            FileId: target.FileId,
+                            OriginalPath: target.Path,
+                            TempPath: tempPath,
+                            FinalPath: finalPath,
+                            CreatedAtUtc: DateTime.UtcNow,
+                            RetryCount: 0,
+                            LastError: ex.Message);
+                        await EnqueuePendingReplacementAsync(pendingItem, ct);
+                        return new EncodeResult(
+                            true,
+                            "pending",
+                            $"{target.Basename}: encoded with {method.Name}, saved {savings:0.0}%. Original file is in use; replacement queued and will retry automatically.",
+                            []);
+                    }
+
                     var finalInfo = await ProbeVideoAsync(tools.FfprobePath, finalPath, ct);
                     UpdateVideoFileMetadata(target, finalPath, finalInfo);
 
@@ -455,6 +503,20 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         return args;
     }
 
+    private static string CreateTempOutputPath(string inputPath, string outputExtension)
+    {
+        var dir = Path.GetDirectoryName(inputPath) ?? "";
+        for (var attempt = 0; attempt < 10; attempt++)
+        {
+            var token = Guid.NewGuid().ToString("N")[..12];
+            var candidate = Path.Combine(dir, $".cove-hevc-{token}.tmp{outputExtension}");
+            if (!File.Exists(candidate))
+                return candidate;
+        }
+
+        throw new IOException($"Could not allocate a temporary output path in {dir}");
+    }
+
     private static void FinalizeOutput(VideoTarget target, string tempPath, string finalPath)
     {
         if (!string.Equals(target.Path, finalPath, StringComparison.OrdinalIgnoreCase) && File.Exists(finalPath))
@@ -464,9 +526,173 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         if (File.Exists(backup))
             File.Delete(backup);
 
-        File.Move(target.Path, backup);
-        File.Move(tempPath, finalPath);
-        File.Delete(backup);
+        var originalMoved = false;
+        try
+        {
+            File.Move(target.Path, backup);
+            originalMoved = true;
+            File.Move(tempPath, finalPath);
+            File.Delete(backup);
+        }
+        catch
+        {
+            if (originalMoved && File.Exists(backup) && !File.Exists(target.Path))
+            {
+                try { File.Move(backup, target.Path); } catch { }
+            }
+            throw;
+        }
+    }
+
+    private static bool IsSharingOrLockViolation(IOException ex)
+    {
+        var code = ex.HResult & 0xFFFF;
+        return code is 32 or 33;
+    }
+
+    private async Task RunPendingReplacementLoopAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await ProcessFirstPendingReplacementAsync(ct);
+                await timer.WaitForNextTickAsync(ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
+            }
+            catch
+            {
+                try { await Task.Delay(TimeSpan.FromSeconds(30), ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { break; }
+            }
+        }
+    }
+
+    private async Task ProcessFirstPendingReplacementAsync(CancellationToken ct)
+    {
+        if (_store is null)
+            return;
+
+        await _pendingQueueLock.WaitAsync(ct);
+        try
+        {
+            var pending = await LoadPendingReplacementsAsync(ct);
+            if (pending.Count == 0)
+                return;
+
+            var item = pending[0];
+            var remove = false;
+            var update = false;
+
+            try
+            {
+                if (!File.Exists(item.TempPath))
+                {
+                    remove = true;
+                }
+                else if (!File.Exists(item.OriginalPath))
+                {
+                    remove = true;
+                }
+                else
+                {
+                    FinalizeOutput(
+                        new VideoTarget(item.VideoId, item.FileId, item.OriginalPath, Path.GetFileName(item.OriginalPath), "", 0, 0),
+                        item.TempPath,
+                        item.FinalPath);
+
+                    var tools = ResolveTools();
+                    if (tools.FfprobePath is not null)
+                    {
+                        var info = await ProbeVideoAsync(tools.FfprobePath, item.FinalPath, ct);
+                        UpdateVideoFileMetadata(
+                            new VideoTarget(item.VideoId, item.FileId, item.OriginalPath, Path.GetFileName(item.OriginalPath), info.Codec, info.Bitrate, new FileInfo(item.FinalPath).Length),
+                            item.FinalPath,
+                            info);
+                    }
+
+                    TryStartRescan([item.FinalPath]);
+                    remove = true;
+                }
+            }
+            catch (IOException ex) when (IsSharingOrLockViolation(ex))
+            {
+                item = item with { RetryCount = item.RetryCount + 1, LastError = ex.Message, LastAttemptUtc = DateTime.UtcNow };
+                update = true;
+            }
+            catch (Exception ex)
+            {
+                item = item with { RetryCount = item.RetryCount + 1, LastError = ex.Message, LastAttemptUtc = DateTime.UtcNow };
+                remove = true;
+            }
+
+            if (remove)
+                pending.RemoveAt(0);
+            else if (update)
+                pending[0] = item;
+
+            await SavePendingReplacementsAsync(pending, ct);
+        }
+        finally
+        {
+            _pendingQueueLock.Release();
+        }
+    }
+
+    private async Task EnqueuePendingReplacementAsync(PendingReplacement item, CancellationToken ct)
+    {
+        if (_store is null)
+            throw new InvalidOperationException("Extension store is not initialized.");
+
+        await _pendingQueueLock.WaitAsync(ct);
+        try
+        {
+            var pending = await LoadPendingReplacementsAsync(ct);
+            var existingIndex = pending.FindIndex(p =>
+                p.FileId == item.FileId
+                || p.OriginalPath.Equals(item.OriginalPath, StringComparison.OrdinalIgnoreCase)
+                || p.TempPath.Equals(item.TempPath, StringComparison.OrdinalIgnoreCase));
+            if (existingIndex >= 0)
+                pending[existingIndex] = item;
+            else
+                pending.Add(item);
+            await SavePendingReplacementsAsync(pending, ct);
+        }
+        finally
+        {
+            _pendingQueueLock.Release();
+        }
+    }
+
+    private async Task<List<PendingReplacement>> LoadPendingReplacementsAsync(CancellationToken ct)
+    {
+        if (_store is null)
+            return [];
+        var json = await _store.GetAsync(PendingReplacementsKey, ct);
+        if (string.IsNullOrWhiteSpace(json))
+            return [];
+        try
+        {
+            return JsonSerializer.Deserialize<List<PendingReplacement>>(json, JsonOptions) ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    private async Task SavePendingReplacementsAsync(List<PendingReplacement> pending, CancellationToken ct)
+    {
+        if (_store is null)
+            return;
+        if (pending.Count == 0)
+            await _store.DeleteAsync(PendingReplacementsKey, ct);
+        else
+            await _store.SetAsync(PendingReplacementsKey, JsonSerializer.Serialize(pending, JsonOptions), ct);
     }
 
     private void UpdateVideoFileMetadata(VideoTarget target, string finalPath, VideoInfo info)
@@ -1159,6 +1385,17 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
     private sealed record EncodeMethod(string Name, IReadOnlyList<string> Args, double MinSavingsPct);
     private sealed record ValidationResult(bool Valid, string? Error);
     private sealed record EncoderHealth(bool Ok, string? FfmpegPath, string? FfprobePath, IReadOnlyList<string> AvailableEncoders, string? SelectedEncoder, string? Error);
+    private sealed record PendingReplacement(
+        string Id,
+        int VideoId,
+        int FileId,
+        string OriginalPath,
+        string TempPath,
+        string FinalPath,
+        DateTime CreatedAtUtc,
+        int RetryCount,
+        string? LastError,
+        DateTime? LastAttemptUtc = null);
 }
 
 public sealed class ActionPayload
