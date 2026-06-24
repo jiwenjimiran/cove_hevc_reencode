@@ -74,9 +74,16 @@
 
 .hevc-control {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
   min-width: 0;
+}
+
+.hevc-warning {
+  flex-basis: 100%;
+  color: #f59e0b;
+  font-size: 12px;
 }
 
 .hevc-input {

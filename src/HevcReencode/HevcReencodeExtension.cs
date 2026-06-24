@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Collections;
 using System.Diagnostics;
 using System.Globalization;
@@ -35,9 +36,9 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
     private Task? _finalizerTask;
     private readonly SemaphoreSlim _pendingQueueLock = new(1, 1);
     public string Id => ExtensionId;
-    public string Name => "HEVC Reencode";
-    public string Version => "0.1.0";
-    public string? Description => "GPU-accelerated HEVC re-encoding for Cove videos.";
+    public string Name => "HEVC/AV1 Reencode";
+    public string Version => "0.2.0";
+    public string? Description => "GPU-accelerated HEVC and AV1 re-encoding for Cove videos.";
     public string? Author => "jiwenji";
     public string? Url => "https://github.com/jiwenjimiran/cove_hevc_reencode";
     public string? IconUrl => null;
@@ -47,7 +48,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 
     public IReadOnlyList<ExtensionJobDefinition> Jobs { get; } =
     [
-        new("reencode-all", "Re-encode all videos to HEVC", "Re-encode every eligible Cove video to HEVC.", false)
+        new("reencode-all", "Re-encode all videos", "Re-encode every eligible Cove video to the configured output format.", false)
     ];
 
     public void ConfigureServices(IServiceCollection services, ExtensionContext context) { }
@@ -84,7 +85,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             [
                 new UISettingsPanel(
                     Id: $"{ExtensionId}:installed",
-                    Label: "HEVC Reencode",
+                    Label: "HEVC/AV1 Reencode",
                     ExtensionId: ExtensionId,
                     ComponentName: "HevcReencodeSettingsPanel",
                     Order: 260,
@@ -92,29 +93,57 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             ],
             Actions =
             [
-                new ExtensionAction(
-                    Id: "hevc-reencode-video-toolbar",
-                    Label: "Re-encode to HEVC",
-                    ExtensionId: ExtensionId,
-                    ActionType: "toolbar",
-                    EntityTypes: ["video"],
-                    Icon: "video",
-                    ApiEndpoint: "/api/ext/hevc-reencode/queue",
-                    HandlerName: null,
-                    Order: 85),
-                new ExtensionAction(
-                    Id: "hevc-reencode-videos-bulk",
-                    Label: "Re-encode selected to HEVC",
-                    ExtensionId: ExtensionId,
-                    ActionType: "bulk",
-                    EntityTypes: ["video", "videos"],
-                    Icon: "video",
-                    ApiEndpoint: "/api/ext/hevc-reencode/queue",
-                    HandlerName: null,
-                    Order: 85)
+                CreateExtensionAction(
+                    id: "hevc-reencode-video-toolbar",
+                    label: "Re-encode video",
+                    actionType: "toolbar",
+                    entityTypes: ["video"],
+                    icon: "video",
+                    apiEndpoint: "/api/ext/hevc-reencode/queue",
+                    order: 85),
+                CreateExtensionAction(
+                    id: "hevc-reencode-videos-bulk",
+                    label: "Re-encode selected",
+                    actionType: "bulk",
+                    entityTypes: ["video", "videos"],
+                    icon: "video",
+                    apiEndpoint: "/api/ext/hevc-reencode/queue",
+                    order: 85)
             ]
         };
         return manifest;
+    }
+
+    private static ExtensionAction CreateExtensionAction(
+        string id,
+        string label,
+        string actionType,
+        string[] entityTypes,
+        string? icon,
+        string? apiEndpoint,
+        int order)
+    {
+        var ctor = typeof(ExtensionAction).GetConstructors()
+            .OrderByDescending(c => c.GetParameters().Length)
+            .First();
+        var args = ctor.GetParameters()
+            .Select(p => p.Name switch
+            {
+                "Id" or "id" => id,
+                "Label" or "label" => label,
+                "ExtensionId" or "extensionId" => ExtensionId,
+                "ActionType" or "actionType" => actionType,
+                "EntityTypes" or "entityTypes" => entityTypes,
+                "Icon" or "icon" => icon,
+                "ApiEndpoint" or "apiEndpoint" => apiEndpoint,
+                "HandlerName" or "handlerName" => null,
+                "Order" or "order" => order,
+                "Pages" or "pages" => null,
+                "SuppressSuccessAlert" or "suppressSuccessAlert" => false,
+                _ => p.HasDefaultValue ? p.DefaultValue : null
+            })
+            .ToArray();
+        return (ExtensionAction)ctor.Invoke(args);
     }
 
     public void MapEndpoints(IEndpointRouteBuilder endpoints)
@@ -154,19 +183,19 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             var ids = payload.EntityIds.Count > 0 ? payload.EntityIds : payload.SelectedIds;
             ids = ids.Where(id => id > 0).Distinct().ToList();
             if (ids.Count == 0)
-                return Results.BadRequest(new { message = "Select one or more videos before queueing HEVC reencode." });
+                return Results.BadRequest(new { message = "Select one or more videos before queueing reencode." });
 
             var jobId = EnqueueViaHostJobService(
                 ctx.RequestServices,
                 $"ext:{ExtensionId}:reencode",
-                $"[HEVC Reencode] Re-encode {ids.Count} selected video{(ids.Count == 1 ? "" : "s")}",
+                $"[Reencode] Re-encode {ids.Count} selected video{(ids.Count == 1 ? "" : "s")}",
                 progress => RunSelectedVideosJobAsync(ids, progress, CancellationToken.None));
 
             return Results.Accepted(value: new
             {
-                message = "HEVC reencode queued.",
+                message = "Reencode queued.",
                 jobId,
-                description = $"HEVC reencode queued for {ids.Count} selected video{(ids.Count == 1 ? "" : "s")}."
+                description = $"Reencode queued for {ids.Count} selected video{(ids.Count == 1 ? "" : "s")}."
             });
         });
     }
@@ -182,72 +211,96 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             return;
         }
 
+        var outputLabel = OutputLabel(settings.OutputFormat);
         var health = await GetEncoderHealthAsync(settings, ct);
         if (!health.Ok)
         {
-            progress.Report(100, $"HEVC reencode failed before starting. {health.Error}");
+            progress.Report(100, $"{outputLabel} reencode failed before starting. {health.Error}");
             return;
         }
+
+        var maxParallelism = await ResolveEncodingParallelismAsync(settings, health.SelectedEncoder, ct);
+        progress.Report(0, $"Starting {outputLabel} reencode with {maxParallelism} encoding engine{(maxParallelism == 1 ? "" : "s")}.");
 
         var completed = 0;
         var succeeded = 0;
         var skipped = 0;
         var pending = 0;
         var failed = 0;
-        var errors = new List<string>();
-        var rescanPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        for (var index = 0; index < targets.Count; index++)
-        {
-            ct.ThrowIfCancellationRequested();
-            var target = targets[index];
-            var prefix = $"{index + 1}/{targets.Count}";
+        var progressLock = new object();
+        var activeProgress = new ConcurrentDictionary<int, double>();
+        var errors = new ConcurrentBag<string>();
+        var rescanPaths = new ConcurrentBag<string>();
 
+        void Report(double percent, string message)
+        {
+            lock (progressLock)
+                progress.Report(percent, message);
+        }
+
+        void ReportAggregate(string message)
+        {
+            var done = Volatile.Read(ref completed);
+            var active = activeProgress.Values.Sum() / 100d;
+            Report(Math.Clamp(((done + active) / targets.Count) * 100d, 0, 99), message);
+        }
+
+        await Parallel.ForEachAsync(
+            targets.Select((target, index) => (target, index)),
+            new ParallelOptions { MaxDegreeOfParallelism = maxParallelism, CancellationToken = ct },
+            async (item, token) =>
+            {
+            var target = item.target;
+            var index = item.index;
+            var prefix = $"{index + 1}/{targets.Count}";
             var skipFamily = settings.SkipCodecs.FirstOrDefault(codec => CodecMatchesFamily(target.VideoCodec, codec));
             if (!settings.StripMetadata && !string.IsNullOrWhiteSpace(skipFamily))
             {
-                skipped++;
-                completed++;
-                progress.Report(Percent(completed, targets.Count), $"{prefix} skipped {target.Basename}: codec {target.VideoCodec}");
-                continue;
+                Interlocked.Increment(ref skipped);
+                Interlocked.Increment(ref completed);
+                ReportAggregate($"{prefix} skipped {target.Basename}: codec {target.VideoCodec}");
+                return;
             }
 
             if (!File.Exists(target.Path))
             {
-                failed++;
-                completed++;
+                Interlocked.Increment(ref failed);
+                Interlocked.Increment(ref completed);
                 var message = $"missing file: {target.Path}";
                 errors.Add($"{target.Basename}: {message}");
-                progress.Report(Percent(completed, targets.Count), $"{prefix} {message}");
-                continue;
+                ReportAggregate($"{prefix} {message}");
+                return;
             }
 
             try
             {
-                progress.Report(Percent(index, targets.Count), $"{prefix} submitting {target.Basename}");
+                activeProgress[index] = 0;
+                ReportAggregate($"{prefix} submitting {target.Basename}");
                 var result = await EncodeOneAsync(target, settings, (pct, message) =>
                 {
-                    var totalPct = ((index + pct / 100d) / targets.Count) * 100d;
-                    progress.Report(totalPct, $"{prefix} {message}");
-                }, ct);
+                    activeProgress[index] = pct;
+                    ReportAggregate($"{prefix} {message}");
+                }, token);
 
                 if (result.Status == "skipped")
-                    skipped++;
+                    Interlocked.Increment(ref skipped);
                 else if (result.Status == "pending")
-                    pending++;
+                    Interlocked.Increment(ref pending);
                 else if (result.Success)
                 {
-                    succeeded++;
+                    Interlocked.Increment(ref succeeded);
                     foreach (var path in result.RescanPaths)
                         rescanPaths.Add(path);
                 }
                 else
                 {
-                    failed++;
+                    Interlocked.Increment(ref failed);
                     errors.Add($"{target.Basename}: {result.Message}");
                 }
 
-                completed++;
-                progress.Report(Percent(completed, targets.Count), $"{prefix} {result.Message}");
+                activeProgress.TryRemove(index, out _);
+                Interlocked.Increment(ref completed);
+                ReportAggregate($"{prefix} {result.Message}");
             }
             catch (OperationCanceledException)
             {
@@ -255,24 +308,27 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             }
             catch (Exception ex)
             {
-                failed++;
-                completed++;
+                activeProgress.TryRemove(index, out _);
+                Interlocked.Increment(ref failed);
+                Interlocked.Increment(ref completed);
                 var message = ex.Message;
                 errors.Add($"{target.Basename}: {message}");
-                progress.Report(Percent(completed, targets.Count), $"{prefix} failed {target.Basename}: {message}");
+                ReportAggregate($"{prefix} failed {target.Basename}: {message}");
             }
-        }
+            });
 
-        if (rescanPaths.Count > 0)
+        var uniqueRescanPaths = rescanPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (uniqueRescanPaths.Count > 0)
         {
-            var scanJobId = TryStartRescan(rescanPaths);
+            var scanJobId = TryStartRescan(uniqueRescanPaths);
             if (!string.IsNullOrWhiteSpace(scanJobId))
-                progress.Report(99, $"Queued Cove rescan for {rescanPaths.Count} path(s). Scan job: {scanJobId}");
+                progress.Report(99, $"Queued Cove rescan for {uniqueRescanPaths.Count} path(s). Scan job: {scanJobId}");
         }
 
-        var summary = $"HEVC reencode complete. Success: {succeeded}, pending replacement: {pending}, skipped: {skipped}, failed: {failed}.";
-        if (errors.Count > 0)
-            summary += " Errors: " + string.Join(" | ", errors.Take(5)) + (errors.Count > 5 ? $" | and {errors.Count - 5} more" : "");
+        var errorList = errors.ToList();
+        var summary = $"{outputLabel} reencode complete. Success: {succeeded}, pending replacement: {pending}, skipped: {skipped}, failed: {failed}.";
+        if (errorList.Count > 0)
+            summary += " Errors: " + string.Join(" | ", errorList.Take(5)) + (errorList.Count > 5 ? $" | and {errorList.Count - 5} more" : "");
         progress.Report(100, summary);
     }
 
@@ -321,9 +377,9 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         if (tools.FfmpegPath is null || tools.FfprobePath is null)
             return new EncodeResult(false, "failed", "ffmpeg/ffprobe is not available. Start Cove once with network access or configure Cove.FfmpegPath.", []);
 
-        var encoder = await SelectHevcEncoderAsync(tools.FfmpegPath, settings, ct);
+        var encoder = await SelectGpuEncoderAsync(tools.FfmpegPath, settings, ct);
         if (encoder is null)
-            return new EncodeResult(false, "failed", "No working GPU HEVC encoder found. Checked hevc_nvenc and hevc_amf; CPU fallback is disabled.", []);
+            return new EncodeResult(false, "failed", $"No working GPU {OutputLabel(settings.OutputFormat)} encoder found. Checked {string.Join(", ", CandidateEncoders(settings))}; CPU fallback is disabled.", []);
 
         var originalSize = new FileInfo(target.Path).Length;
         if (originalSize <= 0)
@@ -343,22 +399,22 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         var format = FormatForPath(target.Path);
         var outputExtension = Path.GetExtension(target.Path);
         var formatChanged = false;
-        if (IsHevcIncompatibleFormat(format))
+        if (IsOutputIncompatibleFormat(format, settings.OutputFormat))
         {
             if (!settings.RemuxIncompatibleContainer)
-                return new EncodeResult(true, "skipped", $"{target.Basename}: container {outputExtension} cannot hold HEVC and remux is disabled.", []);
+                return new EncodeResult(true, "skipped", $"{target.Basename}: container {outputExtension} cannot hold {OutputLabel(settings.OutputFormat)} and remux is disabled.", []);
 
             format = "mp4";
             outputExtension = ".mp4";
             formatChanged = true;
         }
 
-        var finalPath = formatChanged
-            ? Path.Combine(Path.GetDirectoryName(target.Path)!, Path.GetFileNameWithoutExtension(target.Path) + outputExtension)
-            : target.Path;
-        var tempPath = CreateTempOutputPath(target.Path, outputExtension);
+        var finalPath = BuildFinalOutputPath(target.Path, outputExtension, settings, formatChanged);
+        if (!settings.DeleteAfterConvert && File.Exists(finalPath))
+            return new EncodeResult(false, "failed", $"{target.Basename}: output path already exists: {finalPath}", []);
+        var tempPath = CreateTempOutputPath(target.Path, outputExtension, settings.OutputFormat);
 
-        var methods = BuildEncodeMethods(encoder, LooksTooLowBitrate(info.Width, info.Height, info.Bitrate), settings);
+        var methods = BuildEncodeMethods(encoder, settings.OutputFormat, LooksTooLowBitrate(info.Width, info.Height, info.Bitrate), settings);
         var lastError = "";
         foreach (var decode in DecodeModesFor(encoder, info.Codec))
         {
@@ -384,7 +440,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
                         break;
                     }
 
-                    var validation = await ValidateOutputAsync(tools.FfprobePath, tempPath, info.Duration, ct);
+                    var validation = await ValidateOutputAsync(tools.FfprobePath, tempPath, settings.OutputFormat, info.Duration, ct);
                     if (!validation.Valid)
                     {
                         lastError = validation.Error ?? "output validation failed";
@@ -403,9 +459,9 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 
                     try
                     {
-                        FinalizeOutput(target, tempPath, finalPath);
+                        FinalizeOutput(target, tempPath, finalPath, settings.DeleteAfterConvert);
                     }
-                    catch (IOException ex) when (IsSharingOrLockViolation(ex))
+                    catch (IOException ex) when (settings.DeleteAfterConvert && IsSharingOrLockViolation(ex))
                     {
                         var pendingItem = new PendingReplacement(
                             Id: Guid.NewGuid().ToString("N"),
@@ -425,8 +481,11 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
                             []);
                     }
 
-                    var finalInfo = await ProbeVideoAsync(tools.FfprobePath, finalPath, ct);
-                    UpdateVideoFileMetadata(target, finalPath, finalInfo);
+                    if (settings.DeleteAfterConvert)
+                    {
+                        var finalInfo = await ProbeVideoAsync(tools.FfprobePath, finalPath, ct);
+                        UpdateVideoFileMetadata(target, finalPath, finalInfo);
+                    }
 
                     return new EncodeResult(
                         true,
@@ -443,26 +502,34 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 
     private static IReadOnlyList<bool> DecodeModesFor(string encoder, string codec)
     {
-        if (!encoder.Equals("hevc_nvenc", StringComparison.OrdinalIgnoreCase))
+        if (!encoder.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase))
             return [false];
         return BrokenCudaDecodeCodecs.Contains(codec) ? [false] : [true, false];
     }
 
-    private static IReadOnlyList<EncodeMethod> BuildEncodeMethods(string encoder, bool lowBitrate, ReencodeSettings settings)
+    private static IReadOnlyList<EncodeMethod> BuildEncodeMethods(string encoder, string outputFormat, bool lowBitrate, ReencodeSettings settings)
     {
-        var cq = lowBitrate ? settings.CqLowBitrate : settings.Cq;
+        var cq = QualityValue(settings, lowBitrate, aggressive: false);
         var methods = new List<EncodeMethod>();
-        AddMethod(methods, encoder, cq, settings.Preset, "main10", settings.MinSavingsPct);
-        AddMethod(methods, encoder, cq, settings.Preset, "main", settings.MinSavingsPct);
+        if (outputFormat.Equals("hevc", StringComparison.OrdinalIgnoreCase))
+        {
+            AddMethod(methods, encoder, cq, settings.Preset, "main10", settings.MinSavingsPct);
+            AddMethod(methods, encoder, cq, settings.Preset, "main", settings.MinSavingsPct);
+        }
+        else
+        {
+            AddMethod(methods, encoder, cq, settings.Preset, "av1", settings.MinSavingsPct);
+        }
 
         if (settings.EnableRetries)
         {
-            if (settings.AggressiveCq != cq)
-                AddMethod(methods, encoder, settings.AggressiveCq, settings.Preset, "main10", 0);
-            for (var retryCq = 36; retryCq <= settings.UltraAggressiveCq; retryCq += 2)
+            var aggressive = QualityValue(settings, lowBitrate: false, aggressive: true);
+            var ceiling = QualityCeiling(settings);
+            if (aggressive != cq)
+                AddMethod(methods, encoder, aggressive, settings.Preset, outputFormat.Equals("hevc", StringComparison.OrdinalIgnoreCase) ? "main10" : "av1", 0);
+            for (var retryCq = Math.Max(aggressive + 2, outputFormat.Equals("hevc", StringComparison.OrdinalIgnoreCase) ? 36 : aggressive + 2); retryCq <= ceiling; retryCq += 2)
             {
-                if (retryCq > settings.AggressiveCq)
-                    AddMethod(methods, encoder, retryCq, settings.Preset, "main10", 0);
+                AddMethod(methods, encoder, retryCq, settings.Preset, outputFormat.Equals("hevc", StringComparison.OrdinalIgnoreCase) ? "main10" : "av1", 0);
             }
         }
 
@@ -474,12 +541,21 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         var args = new List<string>();
         if (encoder.Equals("hevc_nvenc", StringComparison.OrdinalIgnoreCase))
         {
-            args.AddRange(["-c:v", "hevc_nvenc", "-profile:v", profile, "-rc", "constqp", "-qp", cq.ToString(CultureInfo.InvariantCulture),
-                "-preset", preset, "-tier", "high", "-rc-lookahead", "32", "-spatial_aq", "1", "-aq-strength", "8", "-b:v", "0"]);
+            args.AddRange(["-c:v", encoder, "-rc", "constqp", "-qp", cq.ToString(CultureInfo.InvariantCulture), "-preset", preset,
+                "-profile:v", profile, "-tier", "high", "-rc-lookahead", "32", "-spatial_aq", "1", "-aq-strength", "8", "-b:v", "0"]);
+        }
+        else if (encoder.Equals("av1_nvenc", StringComparison.OrdinalIgnoreCase))
+        {
+            args.AddRange(["-c:v", encoder, "-rc", "vbr", "-cq", cq.ToString(CultureInfo.InvariantCulture), "-preset", preset, "-b:v", "0"]);
+        }
+        else if (encoder.Equals("av1_amf", StringComparison.OrdinalIgnoreCase))
+        {
+            var amfQuality = Math.Clamp(cq, 0, 51).ToString(CultureInfo.InvariantCulture);
+            args.AddRange(["-c:v", encoder, "-rc", "qvbr", "-qvbr_quality_level", amfQuality, "-quality", "high_quality"]);
         }
         else
         {
-            args.AddRange(["-c:v", "hevc_amf", "-rc", "cqp", "-qp_i", cq.ToString(CultureInfo.InvariantCulture),
+            args.AddRange(["-c:v", encoder, "-rc", "cqp", "-qp_i", cq.ToString(CultureInfo.InvariantCulture),
                 "-qp_p", cq.ToString(CultureInfo.InvariantCulture), "-qp_b", cq.ToString(CultureInfo.InvariantCulture)]);
         }
 
@@ -494,7 +570,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 
         args.AddRange(["-i", inputPath]);
         args.AddRange(method.Args);
-        if (method.Args.Contains("hevc_nvenc"))
+        if (method.Args.Any(arg => arg.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase)))
             args.AddRange(["-gpu", settings.GpuIndex.ToString(CultureInfo.InvariantCulture)]);
         args.AddRange(transcodeAudio ? ["-c:a", "aac", "-b:a", "192k"] : ["-c:a", "copy"]);
         if (settings.StripMetadata)
@@ -503,13 +579,13 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         return args;
     }
 
-    private static string CreateTempOutputPath(string inputPath, string outputExtension)
+    private static string CreateTempOutputPath(string inputPath, string outputExtension, string outputFormat)
     {
         var dir = Path.GetDirectoryName(inputPath) ?? "";
         for (var attempt = 0; attempt < 10; attempt++)
         {
             var token = Guid.NewGuid().ToString("N")[..12];
-            var candidate = Path.Combine(dir, $".cove-hevc-{token}.tmp{outputExtension}");
+            var candidate = Path.Combine(dir, $".cove-{outputFormat}-{token}.tmp{outputExtension}");
             if (!File.Exists(candidate))
                 return candidate;
         }
@@ -517,8 +593,29 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         throw new IOException($"Could not allocate a temporary output path in {dir}");
     }
 
-    private static void FinalizeOutput(VideoTarget target, string tempPath, string finalPath)
+    private static string BuildFinalOutputPath(string inputPath, string outputExtension, ReencodeSettings settings, bool formatChanged)
     {
+        var dir = Path.GetDirectoryName(inputPath)!;
+        var basename = Path.GetFileNameWithoutExtension(inputPath);
+        if (!settings.DeleteAfterConvert)
+        {
+            var suffix = string.IsNullOrWhiteSpace(settings.OutputSuffix) ? $"-{settings.OutputFormat}" : settings.OutputSuffix.Trim();
+            return Path.Combine(dir, basename + suffix + outputExtension);
+        }
+
+        return formatChanged ? Path.Combine(dir, basename + outputExtension) : inputPath;
+    }
+
+    private static void FinalizeOutput(VideoTarget target, string tempPath, string finalPath, bool replaceOriginal)
+    {
+        if (!replaceOriginal)
+        {
+            if (File.Exists(finalPath))
+                throw new IOException($"Output path already exists: {finalPath}");
+            File.Move(tempPath, finalPath);
+            return;
+        }
+
         if (!string.Equals(target.Path, finalPath, StringComparison.OrdinalIgnoreCase) && File.Exists(finalPath))
             throw new IOException($"Output path already exists: {finalPath}");
 
@@ -603,7 +700,8 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
                     FinalizeOutput(
                         new VideoTarget(item.VideoId, item.FileId, item.OriginalPath, Path.GetFileName(item.OriginalPath), "", 0, 0),
                         item.TempPath,
-                        item.FinalPath);
+                        item.FinalPath,
+                        replaceOriginal: true);
 
                     var tools = ResolveTools();
                     if (tools.FfprobePath is not null)
@@ -836,9 +934,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
                 return new EncoderHealth(false, tools.FfmpegPath, tools.FfprobePath, [], null, "ffmpeg/ffprobe is not available.");
 
             var encoders = await ListFfmpegEncodersAsync(tools.FfmpegPath, ct);
-            var candidates = settings.EncoderPreference.Equals("auto", StringComparison.OrdinalIgnoreCase)
-                ? new[] { "hevc_nvenc", "hevc_amf" }
-                : new[] { settings.EncoderPreference };
+            var candidates = CandidateEncoders(settings);
             var usable = new List<string>();
             var errors = new List<string>();
             foreach (var candidate in candidates)
@@ -849,7 +945,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
                     continue;
                 }
 
-                if (await ProbeHevcEncoderAsync(tools.FfmpegPath, candidate, ct) is { } error)
+                if (await ProbeGpuEncoderAsync(tools.FfmpegPath, candidate, ct) is { } error)
                     errors.Add($"{candidate}: {error}");
                 else
                     usable.Add(candidate);
@@ -857,7 +953,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
 
             var selected = usable.FirstOrDefault();
             return selected is null
-                ? new EncoderHealth(false, tools.FfmpegPath, tools.FfprobePath, usable, null, "No working GPU HEVC encoder found. " + string.Join("; ", errors))
+                ? new EncoderHealth(false, tools.FfmpegPath, tools.FfprobePath, usable, null, $"No working GPU {OutputLabel(settings.OutputFormat)} encoder found. " + string.Join("; ", errors))
                 : new EncoderHealth(true, tools.FfmpegPath, tools.FfprobePath, usable, selected, null);
         }
         catch (Exception ex)
@@ -866,20 +962,63 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         }
     }
 
-    private async Task<string?> SelectHevcEncoderAsync(string ffmpegPath, ReencodeSettings settings, CancellationToken ct)
+    private async Task<string?> SelectGpuEncoderAsync(string ffmpegPath, ReencodeSettings settings, CancellationToken ct)
     {
         var encoders = await ListFfmpegEncodersAsync(ffmpegPath, ct);
-        var candidates = settings.EncoderPreference.Equals("auto", StringComparison.OrdinalIgnoreCase)
-            ? new[] { "hevc_nvenc", "hevc_amf" }
-            : new[] { settings.EncoderPreference };
-        foreach (var candidate in candidates)
+        foreach (var candidate in CandidateEncoders(settings))
         {
             if (!encoders.Contains(candidate))
                 continue;
-            if (await ProbeHevcEncoderAsync(ffmpegPath, candidate, ct) is null)
+            if (await ProbeGpuEncoderAsync(ffmpegPath, candidate, ct) is null)
                 return candidate;
         }
         return null;
+    }
+
+    private static async Task<int> ResolveEncodingParallelismAsync(ReencodeSettings settings, string? selectedEncoder, CancellationToken ct)
+    {
+        if (settings.MaxConcurrentEncodes > 0)
+            return settings.MaxConcurrentEncodes;
+        if (selectedEncoder is null || !selectedEncoder.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase))
+            return 1;
+        return Math.Max(1, await DetectNvencEngineCountAsync(settings.GpuIndex, ct));
+    }
+
+    private static async Task<int> DetectNvencEngineCountAsync(int gpuIndex, CancellationToken ct)
+    {
+        var nvidiaSmi = FindTool("nvidia-smi");
+        if (nvidiaSmi is null)
+            return 1;
+
+        var result = await RunProcessCaptureAsync(
+            nvidiaSmi,
+            ["--query-gpu=name", "--format=csv,noheader"],
+            TimeSpan.FromSeconds(10),
+            ct);
+        if (result.ExitCode != 0)
+            return 1;
+
+        var names = result.Output.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (gpuIndex < 0 || gpuIndex >= names.Length)
+            return 1;
+
+        return NvencEngineCountForGpu(names[gpuIndex]);
+    }
+
+    private static int NvencEngineCountForGpu(string name)
+    {
+        var normalized = name.ToUpperInvariant();
+        if (normalized.Contains("RTX 5090", StringComparison.OrdinalIgnoreCase))
+            return 3;
+        if (normalized.Contains("RTX 4090", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("RTX 5080", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("RTX 5070 TI", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("RTX 4080", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("RTX 4070 TI", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("RTX 4070 SUPER", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("RTX 4060 TI", StringComparison.OrdinalIgnoreCase))
+            return 2;
+        return 1;
     }
 
     private ToolPaths ResolveTools()
@@ -915,15 +1054,29 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         return names;
     }
 
-    private static async Task<string?> ProbeHevcEncoderAsync(string ffmpegPath, string encoder, CancellationToken ct)
+    private static IReadOnlyList<string> CandidateEncoders(ReencodeSettings settings)
+    {
+        var preferred = settings.EncoderPreference.Trim().ToLowerInvariant();
+        if (!preferred.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            return [preferred];
+        return settings.OutputFormat.Equals("av1", StringComparison.OrdinalIgnoreCase)
+            ? ["av1_nvenc", "av1_amf"]
+            : ["hevc_nvenc", "hevc_amf"];
+    }
+
+    private static async Task<string?> ProbeGpuEncoderAsync(string ffmpegPath, string encoder, CancellationToken ct)
     {
         var args = new List<string>
         {
             "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=1",
             "-frames:v", "1", "-an", "-c:v", encoder
         };
-        if (encoder.Equals("hevc_nvenc", StringComparison.OrdinalIgnoreCase))
+        if (encoder.Equals("av1_nvenc", StringComparison.OrdinalIgnoreCase))
+            args.AddRange(["-rc", "vbr", "-cq", "32", "-preset", "p4", "-b:v", "0", "-f", "null", "-"]);
+        else if (encoder.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase))
             args.AddRange(["-rc", "constqp", "-qp", "32", "-preset", "p4", "-f", "null", "-"]);
+        else if (encoder.Equals("av1_amf", StringComparison.OrdinalIgnoreCase))
+            args.AddRange(["-rc", "qvbr", "-qvbr_quality_level", "32", "-quality", "high_quality", "-f", "null", "-"]);
         else
             args.AddRange(["-rc", "cqp", "-qp_i", "32", "-qp_p", "32", "-qp_b", "32", "-f", "null", "-"]);
 
@@ -975,14 +1128,14 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             FrameRate: frameRate);
     }
 
-    private static async Task<ValidationResult> ValidateOutputAsync(string ffprobePath, string path, double inputDuration, CancellationToken ct)
+    private static async Task<ValidationResult> ValidateOutputAsync(string ffprobePath, string path, string outputFormat, double inputDuration, CancellationToken ct)
     {
         if (!File.Exists(path) || new FileInfo(path).Length == 0)
             return new ValidationResult(false, "output file is missing or empty");
 
         var info = await ProbeVideoAsync(ffprobePath, path, ct);
-        if (!CodecMatchesFamily(info.Codec, "hevc"))
-            return new ValidationResult(false, $"output codec is {info.Codec}, expected HEVC");
+        if (!CodecMatchesFamily(info.Codec, outputFormat))
+            return new ValidationResult(false, $"output codec is {info.Codec}, expected {OutputLabel(outputFormat)}");
         if (info.Width <= 0 || info.Height <= 0)
             return new ValidationResult(false, "output has invalid dimensions");
         if (inputDuration > 0 && info.Duration > 0 && info.Duration / inputDuration < 0.5)
@@ -1165,8 +1318,22 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         _ => "mp4"
     };
 
-    private static bool IsHevcIncompatibleFormat(string format) =>
-        format is "asf" or "avi" or "flv" or "3gp" or "mpeg";
+    private static bool IsOutputIncompatibleFormat(string format, string outputFormat) =>
+        (outputFormat.Equals("hevc", StringComparison.OrdinalIgnoreCase) || outputFormat.Equals("av1", StringComparison.OrdinalIgnoreCase))
+        && format is "asf" or "avi" or "flv" or "3gp" or "mpeg";
+
+    private static string OutputLabel(string outputFormat) =>
+        outputFormat.Equals("av1", StringComparison.OrdinalIgnoreCase) ? "AV1" : "HEVC";
+
+    private static int QualityValue(ReencodeSettings settings, bool lowBitrate, bool aggressive) =>
+        settings.OutputFormat.Equals("av1", StringComparison.OrdinalIgnoreCase)
+            ? aggressive ? settings.Av1AggressiveCq : lowBitrate ? settings.Av1LowBitrateCq : settings.Av1Cq
+            : aggressive ? settings.AggressiveCq : lowBitrate ? settings.CqLowBitrate : settings.Cq;
+
+    private static int QualityCeiling(ReencodeSettings settings) =>
+        settings.OutputFormat.Equals("av1", StringComparison.OrdinalIgnoreCase)
+            ? settings.Av1UltraAggressiveCq
+            : settings.UltraAggressiveCq;
 
     private static bool LooksTooLowBitrate(int width, int height, long bitrate)
     {
@@ -1275,18 +1442,27 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
     private static ReencodeSettings Normalize(ReencodeSettings? value)
     {
         var settings = value ?? new ReencodeSettings();
-        settings.EncoderPreference = settings.EncoderPreference?.Trim().ToLowerInvariant() is "hevc_nvenc" or "hevc_amf"
-            ? settings.EncoderPreference.Trim().ToLowerInvariant()
+        settings.OutputFormat = settings.OutputFormat?.Trim().ToLowerInvariant() is "av1" ? "av1" : "hevc";
+        var allowedEncoders = settings.OutputFormat == "av1"
+            ? new HashSet<string>(["auto", "av1_nvenc", "av1_amf"], StringComparer.OrdinalIgnoreCase)
+            : new HashSet<string>(["auto", "hevc_nvenc", "hevc_amf"], StringComparer.OrdinalIgnoreCase);
+        var encoderPreference = settings.EncoderPreference?.Trim() ?? "";
+        settings.EncoderPreference = allowedEncoders.Contains(encoderPreference)
+            ? encoderPreference.ToLowerInvariant()
             : "auto";
         settings.MaxConcurrentEncodes = Math.Max(-1, settings.MaxConcurrentEncodes);
         settings.Cq = Math.Clamp(settings.Cq, 0, 51);
         settings.CqLowBitrate = Math.Clamp(settings.CqLowBitrate, 0, 51);
+        settings.Av1Cq = Math.Clamp(settings.Av1Cq, 0, 63);
+        settings.Av1LowBitrateCq = Math.Clamp(settings.Av1LowBitrateCq, 0, 63);
         settings.Preset = IsPreset(settings.Preset) ? settings.Preset : "p7";
         settings.SkipCodecs = settings.SkipCodecs.Count == 0 ? ["hevc", "av1", "vp9"] : settings.SkipCodecs.Select(NormalizeCodec).Where(s => s.Length > 0).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         settings.MinSavingsPct = Math.Clamp(settings.MinSavingsPct, 0, 100);
         settings.GpuIndex = Math.Max(0, settings.GpuIndex);
         settings.AggressiveCq = Math.Clamp(settings.AggressiveCq, 0, 51);
         settings.UltraAggressiveCq = Math.Clamp(settings.UltraAggressiveCq, 0, 51);
+        settings.Av1AggressiveCq = Math.Clamp(settings.Av1AggressiveCq, 0, 63);
+        settings.Av1UltraAggressiveCq = Math.Clamp(settings.Av1UltraAggressiveCq, 0, 63);
         settings.ReencodeFailedTag = string.IsNullOrWhiteSpace(settings.ReencodeFailedTag) ? "reencode_failed" : settings.ReencodeFailedTag.Trim();
         return settings;
     }
@@ -1409,10 +1585,13 @@ public sealed class ReencodeSettings
     public bool TagOnFailure { get; set; } = true;
     public string ReencodeFailedTag { get; set; } = "reencode_failed";
     public bool DeleteAfterConvert { get; set; } = true;
+    public string OutputFormat { get; set; } = "hevc";
     public string EncoderPreference { get; set; } = "auto";
     public int MaxConcurrentEncodes { get; set; } = -1;
     public int Cq { get; set; } = 28;
     public int CqLowBitrate { get; set; } = 34;
+    public int Av1Cq { get; set; } = 30;
+    public int Av1LowBitrateCq { get; set; } = 36;
     public string Preset { get; set; } = "p7";
     public List<string> SkipCodecs { get; set; } = ["hevc", "av1", "vp9"];
     public bool SkipFailedTag { get; set; } = true;
@@ -1424,6 +1603,8 @@ public sealed class ReencodeSettings
     public bool EnableRetries { get; set; } = true;
     public int AggressiveCq { get; set; } = 34;
     public int UltraAggressiveCq { get; set; } = 40;
+    public int Av1AggressiveCq { get; set; } = 38;
+    public int Av1UltraAggressiveCq { get; set; } = 44;
     public bool StripMetadata { get; set; } = false;
     public bool EmbedStashMetadata { get; set; } = false;
 }
