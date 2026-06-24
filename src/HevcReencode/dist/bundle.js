@@ -4,32 +4,66 @@ const e = React.createElement;
 const EXT = "cove.community.ai.hevc-reencode";
 const API = "/api/ext/hevc-reencode";
 
-const FIELDS = [
-  { key: "encoderPreference", label: "GPU Encoder", type: "select", def: "auto", options: ["auto", "hevc_nvenc", "hevc_amf"] },
-  { key: "maxConcurrentEncodes", label: "Max Concurrent Encodes", type: "number", def: -1 },
-  { key: "cq", label: "Quality Level (CQ)", type: "number", def: 28, min: 0, max: 51 },
-  { key: "cqLowBitrate", label: "Low-Bitrate CQ", type: "number", def: 34, min: 0, max: 51 },
-  { key: "preset", label: "NVENC Preset", type: "select", def: "p7", options: ["p1", "p2", "p3", "p4", "p5", "p6", "p7"] },
-  { key: "skipCodecs", label: "Skip Codecs", type: "chips", def: ["hevc", "av1", "vp9"], chips: [{ value: "hevc", label: "H.265" }, { value: "av1", label: "AV1" }, { value: "vp9", label: "VP9" }, { value: "vp8", label: "VP8" }] },
-  { key: "skipFailedTag", label: "Skip Previously Failed", type: "bool", def: true },
-  { key: "remuxIncompatibleContainer", label: "Remux Incompatible Containers", type: "bool", def: true },
-  { key: "outputSuffix", label: "Output Filename Suffix (not active in v1)", type: "text", def: "", disabled: true },
-  { key: "copyMetadataOnSuffix", label: "Copy Metadata on Suffix (not active in v1)", type: "bool", def: true, disabled: true },
-  { key: "minSavingsPct", label: "Minimum Savings %", type: "number", def: 15, min: 0, max: 100 },
-  { key: "gpuIndex", label: "GPU Index", type: "number", def: 0, min: 0 },
-  { key: "enableRetries", label: "Enable Aggressive Retries", type: "bool", def: true },
-  { key: "aggressiveCq", label: "Aggressive Retry CQ", type: "number", def: 34, min: 0, max: 51 },
-  { key: "ultraAggressiveCq", label: "Ultra-Aggressive CQ Ceiling", type: "number", def: 40, min: 0, max: 51 },
-  { key: "stripMetadata", label: "Wipe Container Metadata", type: "bool", def: false },
-  { key: "embedStashMetadata", label: "Embed Cove Metadata", type: "bool", def: false, parent: "stripMetadata" }
-];
+function buildFields(settings) {
+  const outputFormat = settings.outputFormat === "av1" ? "av1" : "hevc";
+  const encoderOptions = outputFormat === "av1" ? ["auto", "av1_nvenc", "av1_amf"] : ["auto", "hevc_nvenc", "hevc_amf"];
+  return [
+    { key: "encoderPreference", label: "GPU Encoder", type: "select", def: "auto", options: encoderOptions },
+    { key: "outputFormat", label: "Output Format", type: "select", def: "hevc", options: ["hevc", "av1"] },
+    { key: "maxConcurrentEncodes", label: "Encoding Engines", type: "number", def: -1, min: -1, warning: "WARNING! selecting more than the number of encoding engines will cause GPU thrashing." },
+    outputFormat === "av1"
+      ? { key: "av1Cq", label: "AV1 Quality Level (CQ)", type: "number", def: 30, min: 0, max: 63 }
+      : { key: "cq", label: "HEVC Quality Level (CQ)", type: "number", def: 28, min: 0, max: 51 },
+    outputFormat === "av1"
+      ? { key: "av1LowBitrateCq", label: "AV1 Low-Bitrate CQ", type: "number", def: 36, min: 0, max: 63 }
+      : { key: "cqLowBitrate", label: "HEVC Low-Bitrate CQ", type: "number", def: 34, min: 0, max: 51 },
+    { key: "preset", label: "NVENC Preset", type: "select", def: "p7", options: ["p1", "p2", "p3", "p4", "p5", "p6", "p7"] },
+    { key: "skipCodecs", label: "Skip Codecs", type: "chips", def: ["hevc", "av1", "vp9"], chips: [{ value: "hevc", label: "H.265" }, { value: "av1", label: "AV1" }, { value: "vp9", label: "VP9" }, { value: "vp8", label: "VP8" }] },
+    { key: "skipFailedTag", label: "Skip Previously Failed", type: "bool", def: true },
+    { key: "remuxIncompatibleContainer", label: "Remux Incompatible Containers", type: "bool", def: true },
+    { key: "outputSuffix", label: "Output Filename Suffix", type: "text", def: "", disabledWhen: (s) => s.deleteAfterConvert },
+    { key: "copyMetadataOnSuffix", label: "Copy Metadata on Suffix", type: "bool", def: true, disabledWhen: (s) => s.deleteAfterConvert },
+    { key: "minSavingsPct", label: "Minimum Savings %", type: "number", def: 15, min: 0, max: 100 },
+    { key: "gpuIndex", label: "GPU Index", type: "number", def: 0, min: 0 },
+    { key: "enableRetries", label: "Enable Aggressive Retries", type: "bool", def: true },
+    outputFormat === "av1"
+      ? { key: "av1AggressiveCq", label: "AV1 Aggressive Retry CQ", type: "number", def: 38, min: 0, max: 63 }
+      : { key: "aggressiveCq", label: "HEVC Aggressive Retry CQ", type: "number", def: 34, min: 0, max: 51 },
+    outputFormat === "av1"
+      ? { key: "av1UltraAggressiveCq", label: "AV1 Ultra-Aggressive CQ Ceiling", type: "number", def: 44, min: 0, max: 63 }
+      : { key: "ultraAggressiveCq", label: "HEVC Ultra-Aggressive CQ Ceiling", type: "number", def: 40, min: 0, max: 51 },
+    { key: "stripMetadata", label: "Wipe Container Metadata", type: "bool", def: false },
+    { key: "embedStashMetadata", label: "Embed Cove Metadata", type: "bool", def: false, parent: "stripMetadata" }
+  ];
+}
 
 const DEFAULTS = {
   tagOnFailure: true,
   reencodeFailedTag: "reencode_failed",
-  deleteAfterConvert: true
+  deleteAfterConvert: true,
+  outputFormat: "hevc",
+  encoderPreference: "auto",
+  maxConcurrentEncodes: -1,
+  cq: 28,
+  cqLowBitrate: 34,
+  av1Cq: 30,
+  av1LowBitrateCq: 36,
+  preset: "p7",
+  skipCodecs: ["hevc", "av1", "vp9"],
+  skipFailedTag: true,
+  remuxIncompatibleContainer: true,
+  outputSuffix: "",
+  copyMetadataOnSuffix: true,
+  minSavingsPct: 15,
+  gpuIndex: 0,
+  enableRetries: true,
+  aggressiveCq: 34,
+  ultraAggressiveCq: 40,
+  av1AggressiveCq: 38,
+  av1UltraAggressiveCq: 44,
+  stripMetadata: false,
+  embedStashMetadata: false
 };
-for (const field of FIELDS) DEFAULTS[field.key] = field.def;
 
 async function request(path, options = {}) {
   const res = await fetch(path, { ...options, headers: { "Content-Type": "application/json", ...(options.headers || {}) } });
@@ -51,6 +85,7 @@ function HevcReencodeSettingsPanel() {
   const [message, setMessage] = useState("");
   const [health, setHealth] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(true);
+  const fields = useMemo(() => buildFields(settings), [settings.outputFormat, settings.deleteAfterConvert, settings.stripMetadata]);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,7 +117,9 @@ function HevcReencodeSettingsPanel() {
   }, [settings]);
 
   function update(key, value) {
-    setSettings((current) => ({ ...current, [key]: value }));
+    setSettings((current) => key === "outputFormat"
+      ? { ...current, outputFormat: value, encoderPreference: "auto" }
+      : { ...current, [key]: value });
   }
 
   function reset(key) {
@@ -109,11 +146,12 @@ function HevcReencodeSettingsPanel() {
     ]),
     e("div", { className: "hevc-advanced", key: "advanced" }, [
       e("button", { className: "hevc-advanced-toggle", type: "button", onClick: () => setAdvancedOpen(!advancedOpen) }, `${advancedOpen ? "▾" : "▸"} Advanced Settings`),
-      advancedOpen ? e("div", { className: "hevc-fields" }, FIELDS.map((field) => {
-        const disabled = field.disabled || (field.parent && !settings[field.parent]);
+      advancedOpen ? e("div", { className: "hevc-fields" }, fields.map((field) => {
+        const disabled = field.disabled || (field.disabledWhen && field.disabledWhen(settings)) || (field.parent && !settings[field.parent]);
         return e(Field, { key: field.key, label: field.label, hint: `(default: ${formatDefault(field.def, field)})`, disabled }, [
           e(Editor, { field, value: settings[field.key], disabled, onChange: (value) => update(field.key, value) }),
-          e("button", { type: "button", className: "hevc-reset", disabled: !changed[field.key], onClick: () => reset(field.key) }, "Reset")
+          e("button", { type: "button", className: "hevc-reset", disabled: !changed[field.key], onClick: () => reset(field.key) }, "Reset"),
+          field.warning ? e("span", { className: "hevc-warning" }, field.warning) : null
         ]);
       })) : null
     ]),
@@ -123,7 +161,7 @@ function HevcReencodeSettingsPanel() {
       e("span", { className: "hevc-muted" }, saving ? "Saving..." : message)
     ]),
     health ? e("pre", { className: `hevc-health ${health.ok ? "ok" : "bad"}`, key: "health" }, JSON.stringify(health, null, 2)) : null,
-    e("p", { className: "hevc-note", key: "note" }, "Reencoding runs inside Cove using local ffmpeg/ffprobe with GPU HEVC encoders. Suffix outputs are reserved for a later Cove-native integration.")
+    e("p", { className: "hevc-note", key: "note" }, "Reencoding runs inside Cove using local ffmpeg/ffprobe with GPU HEVC and AV1 encoders.")
   ]);
 }
 
@@ -164,13 +202,18 @@ function Editor({ field, value, disabled, onChange }) {
 
 function formatDefault(value, field) {
   if (Array.isArray(value) && field.chips) return value.map((item) => field.chips.find((chip) => chip.value === item)?.label || item).join(", ");
+  if (field.key === "maxConcurrentEncodes" && value === -1) return "auto";
   return String(value);
 }
 
 function formatOption(option) {
   if (option === "auto") return "Auto";
-  if (option === "hevc_nvenc") return "NVIDIA NVENC";
-  if (option === "hevc_amf") return "AMD AMF";
+  if (option === "hevc") return "HEVC";
+  if (option === "av1") return "AV1";
+  if (option === "hevc_nvenc") return "NVIDIA NVENC HEVC";
+  if (option === "hevc_amf") return "AMD AMF HEVC";
+  if (option === "av1_nvenc") return "NVIDIA NVENC AV1";
+  if (option === "av1_amf") return "AMD AMF AV1";
   if (option === "p1") return "p1 (fastest)";
   if (option === "p4") return "p4 (balanced)";
   if (option === "p7") return "p7 (best compression)";
@@ -184,7 +227,7 @@ async function queueHevcReencode(_action, payload) {
     method: "POST",
     body: JSON.stringify({ entityIds: ids, selectedIds: ids })
   });
-  return { ...res, description: `HEVC reencode queued for ${ids.length} video${ids.length === 1 ? "" : "s"}.` };
+  return { ...res, description: `Reencode queued for ${ids.length} video${ids.length === 1 ? "" : "s"}.` };
 }
 
 export default {
