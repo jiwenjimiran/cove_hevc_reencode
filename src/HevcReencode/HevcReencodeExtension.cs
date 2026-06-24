@@ -93,29 +93,57 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
             ],
             Actions =
             [
-                new ExtensionAction(
-                    Id: "hevc-reencode-video-toolbar",
-                    Label: "Re-encode video",
-                    ExtensionId: ExtensionId,
-                    ActionType: "toolbar",
-                    EntityTypes: ["video"],
-                    Icon: "video",
-                    ApiEndpoint: "/api/ext/hevc-reencode/queue",
-                    HandlerName: null,
-                    Order: 85),
-                new ExtensionAction(
-                    Id: "hevc-reencode-videos-bulk",
-                    Label: "Re-encode selected",
-                    ExtensionId: ExtensionId,
-                    ActionType: "bulk",
-                    EntityTypes: ["video", "videos"],
-                    Icon: "video",
-                    ApiEndpoint: "/api/ext/hevc-reencode/queue",
-                    HandlerName: null,
-                    Order: 85)
+                CreateExtensionAction(
+                    id: "hevc-reencode-video-toolbar",
+                    label: "Re-encode video",
+                    actionType: "toolbar",
+                    entityTypes: ["video"],
+                    icon: "video",
+                    apiEndpoint: "/api/ext/hevc-reencode/queue",
+                    order: 85),
+                CreateExtensionAction(
+                    id: "hevc-reencode-videos-bulk",
+                    label: "Re-encode selected",
+                    actionType: "bulk",
+                    entityTypes: ["video", "videos"],
+                    icon: "video",
+                    apiEndpoint: "/api/ext/hevc-reencode/queue",
+                    order: 85)
             ]
         };
         return manifest;
+    }
+
+    private static ExtensionAction CreateExtensionAction(
+        string id,
+        string label,
+        string actionType,
+        string[] entityTypes,
+        string? icon,
+        string? apiEndpoint,
+        int order)
+    {
+        var ctor = typeof(ExtensionAction).GetConstructors()
+            .OrderByDescending(c => c.GetParameters().Length)
+            .First();
+        var args = ctor.GetParameters()
+            .Select(p => p.Name switch
+            {
+                "Id" or "id" => id,
+                "Label" or "label" => label,
+                "ExtensionId" or "extensionId" => ExtensionId,
+                "ActionType" or "actionType" => actionType,
+                "EntityTypes" or "entityTypes" => entityTypes,
+                "Icon" or "icon" => icon,
+                "ApiEndpoint" or "apiEndpoint" => apiEndpoint,
+                "HandlerName" or "handlerName" => null,
+                "Order" or "order" => order,
+                "Pages" or "pages" => null,
+                "SuppressSuccessAlert" or "suppressSuccessAlert" => false,
+                _ => p.HasDefaultValue ? p.DefaultValue : null
+            })
+            .ToArray();
+        return (ExtensionAction)ctor.Invoke(args);
     }
 
     public void MapEndpoints(IEndpointRouteBuilder endpoints)
