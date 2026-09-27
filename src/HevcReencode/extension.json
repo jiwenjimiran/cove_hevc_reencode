@@ -1,7 +1,7 @@
 {
   "id": "cove.community.ai.hevc-reencode",
   "name": "HEVC/AV1 Reencode",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "GPU-accelerated HEVC and AV1 re-encoding for Cove videos using Cove-managed FFmpeg.",
   "author": "jiwenji",
   "url": "https://github.com/jiwenjimiran/cove_hevc_reencode",
