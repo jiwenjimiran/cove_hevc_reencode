@@ -37,7 +37,7 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
     private readonly SemaphoreSlim _pendingQueueLock = new(1, 1);
     public string Id => ExtensionId;
     public string Name => "HEVC/AV1 Reencode";
-    public string Version => "0.2.0";
+    public string Version => "0.2.1";
     public string? Description => "GPU-accelerated HEVC and AV1 re-encoding for Cove videos.";
     public string? Author => "jiwenji";
     public string? Url => "https://github.com/jiwenjimiran/cove_hevc_reencode";
@@ -541,22 +541,24 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
         var args = new List<string>();
         if (encoder.Equals("hevc_nvenc", StringComparison.OrdinalIgnoreCase))
         {
-            args.AddRange(["-c:v", encoder, "-rc", "constqp", "-qp", cq.ToString(CultureInfo.InvariantCulture), "-preset", preset,
+            args.AddRange(["-c:v", encoder, "-rc", "vbr", "-cq", cq.ToString(CultureInfo.InvariantCulture), "-preset", preset,
                 "-profile:v", profile, "-tier", "high", "-rc-lookahead", "32", "-spatial_aq", "1", "-aq-strength", "8", "-b:v", "0"]);
         }
         else if (encoder.Equals("av1_nvenc", StringComparison.OrdinalIgnoreCase))
         {
-            args.AddRange(["-c:v", encoder, "-rc", "vbr", "-cq", cq.ToString(CultureInfo.InvariantCulture), "-preset", preset, "-b:v", "0"]);
+            args.AddRange(["-c:v", encoder, "-rc", "vbr", "-cq", cq.ToString(CultureInfo.InvariantCulture), "-preset", preset,
+                "-rc-lookahead", "32", "-spatial-aq", "1", "-aq-strength", "8", "-b:v", "0"]);
         }
         else if (encoder.Equals("av1_amf", StringComparison.OrdinalIgnoreCase))
         {
-            var amfQuality = Math.Clamp(cq, 0, 51).ToString(CultureInfo.InvariantCulture);
-            args.AddRange(["-c:v", encoder, "-rc", "qvbr", "-qvbr_quality_level", amfQuality, "-quality", "high_quality"]);
+            var amfQuality = Math.Clamp(cq, 1, 51).ToString(CultureInfo.InvariantCulture);
+            args.AddRange(["-c:v", encoder, "-rc", "qvbr", "-qvbr_quality_level", amfQuality,
+                "-quality", "high_quality", "-preanalysis", "1", "-b:v", "0"]);
         }
         else
         {
-            args.AddRange(["-c:v", encoder, "-rc", "cqp", "-qp_i", cq.ToString(CultureInfo.InvariantCulture),
-                "-qp_p", cq.ToString(CultureInfo.InvariantCulture), "-qp_b", cq.ToString(CultureInfo.InvariantCulture)]);
+            args.AddRange(["-c:v", encoder, "-rc", "qvbr", "-qvbr_quality_level", Math.Clamp(cq, 1, 51).ToString(CultureInfo.InvariantCulture),
+                "-quality", "quality", "-preanalysis", "1", "-b:v", "0"]);
         }
 
         methods.Add(new EncodeMethod($"{encoder}_{profile}_cq{cq}", args, minSavings));
@@ -1068,17 +1070,13 @@ public sealed class HevcReencodeExtension : IExtension, IUIExtension, IStatefulE
     {
         var args = new List<string>
         {
-            "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=1",
-            "-frames:v", "1", "-an", "-c:v", encoder
+            "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30",
+            "-frames:v", "40", "-an"
         };
-        if (encoder.Equals("av1_nvenc", StringComparison.OrdinalIgnoreCase))
-            args.AddRange(["-rc", "vbr", "-cq", "32", "-preset", "p4", "-b:v", "0", "-f", "null", "-"]);
-        else if (encoder.EndsWith("_nvenc", StringComparison.OrdinalIgnoreCase))
-            args.AddRange(["-rc", "constqp", "-qp", "32", "-preset", "p4", "-f", "null", "-"]);
-        else if (encoder.Equals("av1_amf", StringComparison.OrdinalIgnoreCase))
-            args.AddRange(["-rc", "qvbr", "-qvbr_quality_level", "32", "-quality", "high_quality", "-f", "null", "-"]);
-        else
-            args.AddRange(["-rc", "cqp", "-qp_i", "32", "-qp_p", "32", "-qp_b", "32", "-f", "null", "-"]);
+        var methods = new List<EncodeMethod>();
+        AddMethod(methods, encoder, 32, "p7", encoder.StartsWith("hevc", StringComparison.OrdinalIgnoreCase) ? "main10" : "av1", 0);
+        args.AddRange(methods[0].Args);
+        args.AddRange(["-f", "null", "-"]);
 
         var result = await RunProcessCaptureAsync(ffmpegPath, args, TimeSpan.FromSeconds(20), ct);
         return result.ExitCode == 0 ? null : ShortError(result.Error);
@@ -1589,8 +1587,8 @@ public sealed class ReencodeSettings
     public string EncoderPreference { get; set; } = "auto";
     public int MaxConcurrentEncodes { get; set; } = -1;
     public int Cq { get; set; } = 28;
-    public int CqLowBitrate { get; set; } = 34;
-    public int Av1Cq { get; set; } = 30;
+    public int CqLowBitrate { get; set; } = 30;
+    public int Av1Cq { get; set; } = 34;
     public int Av1LowBitrateCq { get; set; } = 36;
     public string Preset { get; set; } = "p7";
     public List<string> SkipCodecs { get; set; } = ["hevc", "av1", "vp9"];
@@ -1600,7 +1598,7 @@ public sealed class ReencodeSettings
     public bool CopyMetadataOnSuffix { get; set; } = true;
     public int MinSavingsPct { get; set; } = 15;
     public int GpuIndex { get; set; } = 0;
-    public bool EnableRetries { get; set; } = true;
+    public bool EnableRetries { get; set; } = false;
     public int AggressiveCq { get; set; } = 34;
     public int UltraAggressiveCq { get; set; } = 40;
     public int Av1AggressiveCq { get; set; } = 38;

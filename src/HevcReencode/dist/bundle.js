@@ -12,11 +12,11 @@ function buildFields(settings) {
     { key: "outputFormat", label: "Output Format", type: "select", def: "hevc", options: ["hevc", "av1"] },
     { key: "maxConcurrentEncodes", label: "Encoding Engines", type: "number", def: -1, min: -1, warning: "WARNING! selecting more than the number of encoding engines will cause GPU thrashing." },
     outputFormat === "av1"
-      ? { key: "av1Cq", label: "AV1 Quality Level (CQ)", type: "number", def: 30, min: 0, max: 63 }
+      ? { key: "av1Cq", label: "AV1 Quality Level (CQ)", type: "number", def: 34, min: 0, max: 63 }
       : { key: "cq", label: "HEVC Quality Level (CQ)", type: "number", def: 28, min: 0, max: 51 },
     outputFormat === "av1"
       ? { key: "av1LowBitrateCq", label: "AV1 Low-Bitrate CQ", type: "number", def: 36, min: 0, max: 63 }
-      : { key: "cqLowBitrate", label: "HEVC Low-Bitrate CQ", type: "number", def: 34, min: 0, max: 51 },
+      : { key: "cqLowBitrate", label: "HEVC Low-Bitrate CQ", type: "number", def: 30, min: 0, max: 51 },
     { key: "preset", label: "NVENC Preset", type: "select", def: "p7", options: ["p1", "p2", "p3", "p4", "p5", "p6", "p7"] },
     { key: "skipCodecs", label: "Skip Codecs", type: "chips", def: ["hevc", "av1", "vp9"], chips: [{ value: "hevc", label: "H.265" }, { value: "av1", label: "AV1" }, { value: "vp9", label: "VP9" }, { value: "vp8", label: "VP8" }] },
     { key: "skipFailedTag", label: "Skip Previously Failed", type: "bool", def: true },
@@ -25,7 +25,7 @@ function buildFields(settings) {
     { key: "copyMetadataOnSuffix", label: "Copy Metadata on Suffix", type: "bool", def: true, disabledWhen: (s) => s.deleteAfterConvert },
     { key: "minSavingsPct", label: "Minimum Savings %", type: "number", def: 15, min: 0, max: 100 },
     { key: "gpuIndex", label: "GPU Index", type: "number", def: 0, min: 0 },
-    { key: "enableRetries", label: "Enable Aggressive Retries", type: "bool", def: true },
+    { key: "enableRetries", label: "Enable Aggressive Retries", type: "bool", def: false, warning: "Retries trade visual quality for smaller files. Existing saved choices are preserved." },
     outputFormat === "av1"
       ? { key: "av1AggressiveCq", label: "AV1 Aggressive Retry CQ", type: "number", def: 38, min: 0, max: 63 }
       : { key: "aggressiveCq", label: "HEVC Aggressive Retry CQ", type: "number", def: 34, min: 0, max: 51 },
@@ -45,8 +45,8 @@ const DEFAULTS = {
   encoderPreference: "auto",
   maxConcurrentEncodes: -1,
   cq: 28,
-  cqLowBitrate: 34,
-  av1Cq: 30,
+  cqLowBitrate: 30,
+  av1Cq: 34,
   av1LowBitrateCq: 36,
   preset: "p7",
   skipCodecs: ["hevc", "av1", "vp9"],
@@ -56,7 +56,7 @@ const DEFAULTS = {
   copyMetadataOnSuffix: true,
   minSavingsPct: 15,
   gpuIndex: 0,
-  enableRetries: true,
+  enableRetries: false,
   aggressiveCq: 34,
   ultraAggressiveCq: 40,
   av1AggressiveCq: 38,
